@@ -10,6 +10,7 @@
 //! which is what JSON text encodes and what the format depends on.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fmt;
 use std::rc::Rc;
 
@@ -215,30 +216,60 @@ impl Value {
 
 /// Structural equality. Arrays and objects compare by content.
 ///
-/// This walks the graph, so do not call it on cyclic values. Tests that need
-/// to compare cyclic graphs use [`Value::ptr_eq`] on the shared nodes instead.
+/// The walk is cycle-safe. It tracks the container pairs it is comparing and
+/// treats a repeat pair as equal, so two equal cyclic graphs return `true`
+/// instead of recursing forever. Float members follow `f64` rules, so a graph
+/// holding `NaN` never equals itself.
 impl PartialEq for Value {
     fn eq(&self, other: &Value) -> bool {
-        match (self, other) {
-            (Value::Null, Value::Null) => true,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Number(a), Value::Number(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Array(a), Value::Array(b)) => *a.borrow() == *b.borrow(),
-            (Value::Object(a), Value::Object(b)) => {
-                let a = a.borrow();
-                let b = b.borrow();
-                if a.len() != b.len() {
-                    return false;
-                }
-                let equal = a
-                    .iter()
-                    .zip(b.iter())
-                    .all(|((ka, va), (kb, vb))| ka == kb && va == vb);
-                equal
+        let mut visiting = HashSet::new();
+        eq_rec(self, other, &mut visiting)
+    }
+}
+
+/// Compare two values, guarding against cycles with a set of container pairs
+/// already on the comparison stack. A repeat pair short-circuits to equal.
+fn eq_rec(a: &Value, b: &Value, visiting: &mut HashSet<(usize, usize)>) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Number(x), Value::Number(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Array(x), Value::Array(y)) => {
+            let pair = (Rc::as_ptr(x) as usize, Rc::as_ptr(y) as usize);
+            if !visiting.insert(pair) {
+                return true;
             }
-            _ => false,
+            let result = {
+                let xs = x.borrow();
+                let ys = y.borrow();
+                xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(ys.iter())
+                        .all(|(va, vb)| eq_rec(va, vb, visiting))
+            };
+            visiting.remove(&pair);
+            result
         }
+        (Value::Object(x), Value::Object(y)) => {
+            let pair = (Rc::as_ptr(x) as usize, Rc::as_ptr(y) as usize);
+            if !visiting.insert(pair) {
+                return true;
+            }
+            let result = {
+                let xs = x.borrow();
+                let ys = y.borrow();
+                xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(ys.iter())
+                        .all(|((ka, va), (kb, vb))| ka == kb && eq_rec(va, vb, visiting))
+            };
+            visiting.remove(&pair);
+            result
+        }
+        _ => false,
     }
 }
 
