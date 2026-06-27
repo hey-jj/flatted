@@ -38,10 +38,14 @@ impl<'a> Replacer<'a> {
 }
 
 /// Indentation for pretty output, like the third argument to `JSON.stringify`.
+///
+/// `JSON.stringify` caps indentation at 10. A width over 10 uses 10 spaces, and
+/// a string longer than 10 characters uses its first 10. Both forms apply that
+/// cap here.
 pub enum Space {
-    /// Indent each level by this many spaces.
+    /// Indent each level by this many spaces, capped at 10.
     Width(usize),
-    /// Indent each level by this literal string.
+    /// Indent each level by this literal string, capped at its first 10 chars.
     Str(String),
 }
 
@@ -49,9 +53,9 @@ impl Space {
     fn to_indent(&self) -> Indent {
         match self {
             Space::Width(0) => Indent::None,
-            Space::Width(n) => Indent::With(" ".repeat(*n)),
+            Space::Width(n) => Indent::With(" ".repeat((*n).min(10))),
             Space::Str(s) if s.is_empty() => Indent::None,
-            Space::Str(s) => Indent::With(s.clone()),
+            Space::Str(s) => Indent::With(s.chars().take(10).collect()),
         }
     }
 }
