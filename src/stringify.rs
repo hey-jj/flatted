@@ -156,8 +156,8 @@ impl<'a> State<'a> {
     /// Replace an already-applied value with its index, hoisting on first sight.
     ///
     /// Strings, arrays, and objects become an index string. Null and other
-    /// primitives pass through. This mirrors the fall-through in the source
-    /// `replace`: non-null object, array, and string share one hoist path.
+    /// primitives pass through. Non-null objects, arrays, and strings share one
+    /// hoist path, so each is stored once and later seen as its index.
     fn relate(&mut self, after: Value) -> Value {
         match &after {
             Value::Null => Value::Null,
@@ -173,8 +173,8 @@ impl<'a> State<'a> {
     }
 
     /// Build a node's flattened form: its own shell with children replaced by
-    /// index strings. The node value itself is not re-hoisted, matching the
-    /// `firstRun` skip in the source.
+    /// index strings. The node value itself is not re-hoisted. It already has an
+    /// index from when it entered the table.
     fn flatten_children(&mut self, node: &Value) -> Value {
         match node {
             Value::Array(rc) => {
