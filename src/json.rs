@@ -367,28 +367,43 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
+    /// Advance over a run of ASCII digits. Return how many were consumed.
+    fn consume_digits(&mut self) -> usize {
+        let start = self.pos;
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+            self.pos += 1;
+        }
+        self.pos - start
+    }
+
     fn parse_number(&mut self) -> Result<Value, ParseError> {
         let start = self.pos;
         if self.peek() == Some(b'-') {
             self.pos += 1;
         }
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() {
+
+        // Integer part. JSON allows a single `0` or a run that does not start
+        // with `0`. So `01` is rejected, `0` and `10` are fine.
+        match self.peek() {
+            Some(b'0') => {
                 self.pos += 1;
-            } else {
-                break;
+                if matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                    return Err(self.error("leading zero in number"));
+                }
             }
+            Some(c) if c.is_ascii_digit() => {
+                self.consume_digits();
+            }
+            _ => return Err(self.error("expected a digit in number")),
         }
+
         let mut is_float = false;
         if self.peek() == Some(b'.') {
             is_float = true;
             self.pos += 1;
-            while let Some(c) = self.peek() {
-                if c.is_ascii_digit() {
-                    self.pos += 1;
-                } else {
-                    break;
-                }
+            // A decimal point needs at least one digit after it.
+            if self.consume_digits() == 0 {
+                return Err(self.error("missing digit after decimal point"));
             }
         }
         if matches!(self.peek(), Some(b'e') | Some(b'E')) {
@@ -397,12 +412,9 @@ impl<'a> Parser<'a> {
             if matches!(self.peek(), Some(b'+') | Some(b'-')) {
                 self.pos += 1;
             }
-            while let Some(c) = self.peek() {
-                if c.is_ascii_digit() {
-                    self.pos += 1;
-                } else {
-                    break;
-                }
+            // An exponent needs at least one digit.
+            if self.consume_digits() == 0 {
+                return Err(self.error("missing digit in exponent"));
             }
         }
         let slice = &self.text[start..self.pos];
