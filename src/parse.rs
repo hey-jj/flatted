@@ -76,7 +76,7 @@ pub fn parse(text: &str, reviver: Option<Reviver>) -> Result<Value, ParseError> 
             i += 1;
             resolver.revive_node(&target, &mut lazy)?;
             let revived = call_reviver(reviver, &key, target);
-            owner.assign(&key, revived);
+            owner.assign(revived);
         }
         root
     } else {
@@ -102,7 +102,9 @@ enum Slot {
 }
 
 impl Slot {
-    fn assign(&self, _key: &str, value: Value) {
+    /// Write a resolved value back into its parent. The slot already holds the
+    /// array index or object key, so no key argument is needed.
+    fn assign(&self, value: Value) {
         match self {
             Slot::Array(rc, index) => {
                 rc.borrow_mut()[*index] = value;
@@ -168,10 +170,10 @@ impl<'a> Resolver<'a> {
                     target,
                 });
             } else {
-                slot.assign(key, call_reviver(self.reviver, key, target));
+                slot.assign(call_reviver(self.reviver, key, target));
             }
         } else {
-            slot.assign(key, call_reviver(self.reviver, key, child));
+            slot.assign(call_reviver(self.reviver, key, child));
         }
         Ok(())
     }
