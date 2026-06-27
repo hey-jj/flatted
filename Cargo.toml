@@ -8,3 +8,7 @@ repository = "https://github.com/hey-jj/flatted"
 readme = "README.md"
 
 [dependencies]
+
+[dev-dependencies]
+# Hashing for the language-independent golden over a large real-world file.
+sha2 = "0.10"
