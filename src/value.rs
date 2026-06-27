@@ -18,6 +18,12 @@ use std::rc::Rc;
 /// Integers and floats stay distinct so `1` serializes as `1`, never `1.0`.
 /// Non-finite floats (`NaN`, infinities) serialize as `null`, matching
 /// `JSON.stringify`.
+///
+/// Equality is by representation. `Int` and `UInt` never compare equal even at
+/// the same value, so `Int(1) != UInt(1)`. The JSON reader picks `Int` for
+/// anything that fits `i64` and `UInt` only past that range, so values parsed
+/// from text stay on one path and compare as expected. A `UInt(1)` built by
+/// hand will not equal `Int(1)`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Number {
     /// A signed integer.
@@ -29,10 +35,12 @@ pub enum Number {
 }
 
 impl Number {
-    /// Render the number as JSON text.
+    /// Render the number as JSON text into a caller buffer.
     ///
-    /// Non-finite floats become `null` to match `JSON.stringify`.
-    pub fn write(&self, out: &mut String) {
+    /// Internal writer entry point for the JSON serializer. Non-finite floats
+    /// become `null` to match `JSON.stringify`. The public path is [`Display`],
+    /// so `to_string()` and `{}` give the same text.
+    pub(crate) fn write(&self, out: &mut String) {
         match self {
             Number::Int(n) => out.push_str(&n.to_string()),
             Number::UInt(n) => out.push_str(&n.to_string()),
@@ -47,17 +55,63 @@ impl Number {
     }
 }
 
-/// Format a finite float the way `JSON.stringify` does for the common cases.
-///
-/// A float with no fractional part prints without a trailing `.0`, so `2.0`
-/// becomes `2`. Everything else uses Rust's shortest round-tripping form.
-fn format_float(f: f64) -> String {
-    if f == f.trunc() && f.abs() < 1e16 {
-        format!("{}", f as i64)
-    } else {
-        let s = format!("{f}");
-        s
+/// JSON text for the number. Non-finite floats render as `null`, matching
+/// `JSON.stringify`. `NaN` is never equal to itself, so two `Number::Float(NaN)`
+/// values compare unequal under the derived `PartialEq` even though both print
+/// as `null`.
+impl fmt::Display for Number {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = String::new();
+        self.write(&mut out);
+        f.write_str(&out)
     }
+}
+
+/// Format a finite float the way `JSON.stringify` does.
+///
+/// This follows the ECMAScript Number-to-string algorithm. A float with no
+/// fractional part prints without a trailing `.0`, so `2.0` becomes `2`. Large
+/// and small magnitudes use exponent form on the same thresholds JavaScript
+/// uses: magnitude `>= 1e21` or `< 1e-6` switches to `e` notation. Everything
+/// in between prints as plain decimal.
+fn format_float(f: f64) -> String {
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    let sign = if f < 0.0 { "-" } else { "" };
+
+    // Rust's `{:e}` gives the shortest round-tripping mantissa and a base-10
+    // exponent. Split it into the significant digits and that exponent.
+    let sci = format!("{:e}", f.abs());
+    let (mantissa, exp) = sci.split_once('e').expect("scientific form has an e");
+    let exp: i32 = exp.parse().expect("exponent is an integer");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i32; // count of significant digits
+    let n = exp + 1; // decimal point position: value = digits * 10^(n - k)
+
+    let body = if k <= n && n <= 21 {
+        // Integer, pad with trailing zeros.
+        let mut s = digits;
+        s.push_str(&"0".repeat((n - k) as usize));
+        s
+    } else if 0 < n && n <= 21 {
+        // Decimal point falls inside the digit run.
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        // Small magnitude, lead with zeros after the point.
+        format!("0.{}{}", "0".repeat((-n) as usize), digits)
+    } else {
+        // Exponent form. One digit before the point, then `e`, sign, exponent.
+        let e = n - 1;
+        let esign = if e >= 0 { "+" } else { "-" };
+        let mantissa = if k == 1 {
+            digits
+        } else {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        };
+        format!("{mantissa}e{esign}{}", e.abs())
+    };
+    format!("{sign}{body}")
 }
 
 /// A JSON value that may take part in a cyclic or shared graph.
@@ -198,6 +252,16 @@ impl fmt::Debug for Value {
             Value::Array(_) => write!(f, "Array(..)"),
             Value::Object(_) => write!(f, "Object(..)"),
         }
+    }
+}
+
+/// Compact JSON text for a single value, the same bytes `stringify` writes for
+/// one node. This is plain JSON, not the flat table. It walks the graph, so do
+/// not format a cyclic value with it. Use [`crate::stringify`] for graphs that
+/// may contain cycles.
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&crate::json::write(self, &crate::json::Indent::None))
     }
 }
 
