@@ -200,3 +200,39 @@ impl fmt::Debug for Value {
         }
     }
 }
+
+/// Drop deeply nested graphs without recursing.
+///
+/// A naive drop walks the tree on the call stack, so a chain thousands of
+/// levels deep would overflow. This drains children into a heap worklist and
+/// frees them in a loop. When a node is the last owner of a container, its
+/// children move onto the list, so freeing stays flat. Shared and cyclic nodes
+/// with other owners are left for those owners to free.
+impl Drop for Value {
+    fn drop(&mut self) {
+        let mut stack: Vec<Value> = Vec::new();
+        collect_children(self, &mut stack);
+        while let Some(mut value) = stack.pop() {
+            collect_children(&mut value, &mut stack);
+        }
+    }
+}
+
+/// If `value` is the last owner of a container, move its children onto `stack`
+/// and leave the container empty, so the recursive drop has nothing to descend.
+fn collect_children(value: &mut Value, stack: &mut Vec<Value>) {
+    match value {
+        Value::Array(rc) => {
+            if let Some(cell) = Rc::get_mut(rc) {
+                stack.append(cell.get_mut());
+            }
+        }
+        Value::Object(rc) => {
+            if let Some(cell) = Rc::get_mut(rc) {
+                let entries = std::mem::take(&mut cell.get_mut().entries);
+                stack.extend(entries.into_iter().map(|(_, v)| v));
+            }
+        }
+        _ => {}
+    }
+}

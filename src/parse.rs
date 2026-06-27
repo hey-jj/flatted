@@ -41,7 +41,7 @@ pub type Reviver<'a> = &'a dyn Fn(&str, Value) -> Value;
 /// ```
 pub fn parse(text: &str, reviver: Option<Reviver>) -> Result<Value, ParseError> {
     let decoded = json::read(text)?;
-    let input = match decoded {
+    let input = match &decoded {
         Value::Array(rc) => rc.borrow().clone(),
         _ => {
             return Err(ParseError {
