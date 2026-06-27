@@ -2,10 +2,12 @@
 name = "flatted"
 version = "0.1.0"
 edition = "2021"
-description = "serialize/deserialize JSON containing circular references"
+description = "Serialize and parse JSON with circular and shared references"
 license = "MIT"
 repository = "https://github.com/hey-jj/flatted"
 readme = "README.md"
+keywords = ["json", "circular", "serialize", "cycle", "reference"]
+categories = ["encoding", "parser-implementations"]
 
 [dependencies]
 
