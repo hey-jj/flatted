@@ -39,10 +39,10 @@ pub fn arr(items: Vec<Value>) -> Value {
 
 /// Build a shared object node from key/value pairs, in order.
 pub fn obj(pairs: Vec<(&str, Value)>) -> Value {
-    let mut object = Object::new();
-    for (key, value) in pairs {
-        object.insert(key.to_string(), value);
-    }
+    let object: Object = pairs
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect();
     Value::object(object)
 }
 
@@ -115,7 +115,7 @@ fn write_canonical(value: &Value, depth: usize, out: &mut String) {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
         Value::Bool(false) => out.push_str("false"),
-        Value::Number(num) => num.write(out),
+        Value::Number(num) => out.push_str(&num.to_string()),
         Value::Str(text) => write_string(text, out),
         Value::Array(rc) => {
             let items = rc.borrow();

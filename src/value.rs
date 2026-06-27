@@ -165,6 +165,20 @@ impl Object {
         self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
+    /// Look up a key for mutation.
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        self.entries
+            .iter_mut()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
+    }
+
+    /// Remove a key and return its value, keeping the order of the rest.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        let pos = self.entries.iter().position(|(k, _)| k == key)?;
+        Some(self.entries.remove(pos).1)
+    }
+
     /// Number of keys.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -183,6 +197,63 @@ impl Object {
     /// The keys in insertion order.
     pub fn keys(&self) -> impl Iterator<Item = &String> {
         self.entries.iter().map(|(k, _)| k)
+    }
+
+    /// The values in insertion order.
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.entries.iter().map(|(_, v)| v)
+    }
+}
+
+impl FromIterator<(String, Value)> for Object {
+    /// Collect pairs into an object. A later pair with a repeated key overwrites
+    /// the earlier value and keeps the first position, matching [`Object::insert`].
+    fn from_iter<I: IntoIterator<Item = (String, Value)>>(iter: I) -> Self {
+        let mut object = Object::new();
+        for (key, value) in iter {
+            object.insert(key, value);
+        }
+        object
+    }
+}
+
+impl IntoIterator for Object {
+    type Item = (String, Value);
+    type IntoIter = std::vec::IntoIter<(String, Value)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Object {
+    type Item = (&'a String, &'a Value);
+    type IntoIter = std::iter::Map<
+        std::slice::Iter<'a, (String, Value)>,
+        fn(&'a (String, Value)) -> (&'a String, &'a Value),
+    >;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter().map(|(k, v)| (k, v))
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Object {
+    type Item = (&'a String, &'a mut Value);
+    type IntoIter = std::iter::Map<
+        std::slice::IterMut<'a, (String, Value)>,
+        fn(&'a mut (String, Value)) -> (&'a String, &'a mut Value),
+    >;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter_mut().map(|(k, v)| (&*k, v))
+    }
+}
+
+impl std::ops::Index<&str> for Object {
+    type Output = Value;
+    /// Read a key. Panics when the key is missing, like indexing a slice out of
+    /// bounds. Use [`Object::get`] when the key may be absent.
+    fn index(&self, key: &str) -> &Value {
+        self.get(key)
+            .unwrap_or_else(|| panic!("no entry found for key {key:?}"))
     }
 }
 

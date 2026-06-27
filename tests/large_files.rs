@@ -23,7 +23,7 @@ fn write_compact(value: &Value, out: &mut String) {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
         Value::Bool(false) => out.push_str("false"),
-        Value::Number(num) => num.write(out),
+        Value::Number(num) => out.push_str(&num.to_string()),
         Value::Str(text) => {
             out.push('"');
             for c in text.chars() {
