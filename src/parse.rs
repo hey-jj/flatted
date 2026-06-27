@@ -18,6 +18,17 @@ use crate::value::{Object, Value};
 ///
 /// The root is visited last with key `""`. Members are visited with their
 /// property name or array index. The returned value replaces the original.
+///
+/// The reviver takes its value by move and returns a value, because a parse
+/// reviver always produces a replacement. The stringify side uses
+/// [`crate::Replacer`], which borrows its value and returns `Option<Value>`, so
+/// a replacer can keep a value without cloning it or drop it by returning
+/// `None`. The two callbacks differ in shape because they do different jobs.
+///
+/// Deletion is not modeled. A JavaScript reviver returning `undefined` deletes
+/// an object property or nulls an array hole. This signature returns a `Value`,
+/// so there is no way to signal "drop this". Return the value unchanged to keep
+/// it.
 pub type Reviver<'a> = &'a dyn Fn(&str, Value) -> Value;
 
 /// Convert flatted text back into a value graph.

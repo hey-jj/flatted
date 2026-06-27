@@ -61,6 +61,11 @@ pub use value::{Number, Object, Value};
 /// still in place. Embed it in a host structure and serialize that with any
 /// JSON writer without losing the cycles.
 ///
+/// The `Result` exists for type symmetry with [`from_json`]. The error arm is
+/// unreachable in practice: `stringify` always emits text that this crate's own
+/// reader accepts. The signature keeps a `Result` so callers handle both sides
+/// of the bridge the same way.
+///
 /// ```
 /// use flatted::{to_json, Value};
 /// let v = Value::array(vec![Value::Str("a".to_string())]);
