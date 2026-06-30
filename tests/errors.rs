@@ -39,3 +39,16 @@ fn trailing_characters_error() {
 fn unterminated_string_errors() {
     assert!(parse(r#"["abc]"#, None).is_err());
 }
+
+#[test]
+fn malformed_unicode_escape_errors() {
+    // A `\u` escape followed by a multi-byte character used to slice across a
+    // UTF-8 boundary and panic. It must return an error instead.
+    assert!(parse("[\"\\u0\u{1D11E}\"]", None).is_err());
+}
+
+#[test]
+fn raw_control_byte_in_string_errors() {
+    // A literal newline inside a string is not valid JSON.
+    assert!(parse("[\"a\nb\"]", None).is_err());
+}

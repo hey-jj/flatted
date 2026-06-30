@@ -299,6 +299,7 @@ impl<'a> Parser<'a> {
                     self.pos += 1;
                     self.parse_escape(&mut s)?;
                 }
+                c if c < 0x20 => return Err(self.error("control character in string")),
                 _ => {
                     // Copy one UTF-8 char from the source.
                     let rest = &self.text[self.pos..];
@@ -360,10 +361,19 @@ impl<'a> Parser<'a> {
         if self.pos + 4 > self.bytes.len() {
             return Err(self.error("truncated unicode escape"));
         }
-        let hex = &self.text[self.pos..self.pos + 4];
-        let value = u32::from_str_radix(hex, 16)
-            .map_err(|_| self.error("invalid hex in unicode escape"))?;
-        self.pos += 4;
+        // Read four hex digits as bytes. Slicing the string here would panic
+        // when a multi-byte character starts inside the four-byte window.
+        let mut value = 0u32;
+        for _ in 0..4 {
+            let digit = match self.bytes[self.pos] {
+                b @ b'0'..=b'9' => b - b'0',
+                b @ b'a'..=b'f' => b - b'a' + 10,
+                b @ b'A'..=b'F' => b - b'A' + 10,
+                _ => return Err(self.error("invalid hex in unicode escape")),
+            };
+            value = value * 16 + u32::from(digit);
+            self.pos += 1;
+        }
         Ok(value)
     }
 
