@@ -182,10 +182,15 @@ impl<'a> State<'a> {
                 let mut out = Vec::with_capacity(items.len());
                 for (i, item) in items.iter().enumerate() {
                     let key = i.to_string();
-                    // A dropped array element becomes null, like JSON.stringify.
-                    match self.replacer_apply(&key, item) {
-                        None => out.push(Value::Null),
-                        Some(after) => out.push(self.relate(after)),
+                    match self.replacer {
+                        Some(Replacer::Allowlist(_)) => out.push(self.relate(item.clone())),
+                        _ => {
+                            // A dropped array element becomes null, like JSON.stringify.
+                            match self.replacer_apply(&key, item) {
+                                None => out.push(Value::Null),
+                                Some(after) => out.push(self.relate(after)),
+                            }
+                        }
                     }
                 }
                 Value::array(out)

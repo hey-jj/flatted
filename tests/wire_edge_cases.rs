@@ -77,14 +77,13 @@ fn duplicate_keys_keep_last() {
     assert_eq!(get(&back, "a"), n(2));
 }
 
-/// An allow-list filters array element keys too. Indices are not in the list,
-/// so each element drops to null.
+/// An allow-list keeps array elements when the array itself is kept.
 #[test]
-fn allowlist_nulls_array_elements() {
+fn allowlist_keeps_array_elements() {
     let o = obj(vec![("a", arr(vec![n(1), n(2), n(3)])), ("b", n(5))]);
     let replacer = Replacer::Allowlist(vec!["a".to_string()]);
     assert_eq!(
         stringify(&o, Some(&replacer), None),
-        r#"[{"a":"1"},[null,null,null]]"#
+        r#"[{"a":"1"},[1,2,3]]"#
     );
 }
