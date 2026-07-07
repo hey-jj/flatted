@@ -5,7 +5,8 @@
 //! table. Strings that sit as top-level table entries are literal values. That
 //! split, by position not by content, is how a literal `"3"` stays a string
 //! while an index `"3"` becomes a reference. Resolution runs through a queue,
-//! so deep graphs do not overflow the stack.
+//! so deep graphs do not overflow the stack. When a reviver is present, parse
+//! first builds the graph, then walks that graph and applies the reviver.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -18,6 +19,9 @@ use crate::value::{Object, Value};
 ///
 /// The root is visited last with key `""`. Members are visited with their
 /// property name or array index. The returned value replaces the original.
+/// Shared or cyclic containers are walked once for their descendants. The
+/// reviver still runs for each holder, so each holder receives its own
+/// replacement.
 ///
 /// The reviver takes its value by move and returns a value, because a parse
 /// reviver always produces a replacement. The stringify side uses
@@ -70,38 +74,23 @@ pub fn parse(text: &str, reviver: Option<Reviver>) -> Result<Value, ParseError> 
         }
     };
 
-    let resolver = Resolver {
+    let mut resolver = Resolver {
         input,
-        parsed: RefCell::new(HashSet::new()),
-        reviver,
+        parsed: HashSet::new(),
     };
 
-    let value = if root.is_container() {
-        resolver.parsed.borrow_mut().insert(addr(&root));
-        let mut lazy: Vec<Deferred> = Vec::new();
-        resolver.revive_node(&root, &mut lazy)?;
+    let value = resolver.resolve_root(root)?;
 
-        let mut i = 0;
-        while i < lazy.len() {
-            let Deferred { owner, key, target } = lazy[i].clone();
-            i += 1;
-            resolver.revive_node(&target, &mut lazy)?;
-            let revived = call_reviver(reviver, &key, target);
-            owner.assign(revived);
-        }
-        root
-    } else {
-        root
-    };
-
-    Ok(call_reviver(reviver, "", value))
+    match reviver {
+        Some(f) => Ok(revive_graph(f, value)),
+        None => Ok(value),
+    }
 }
 
 /// A slot whose pointer target needs resolving after the current node.
 #[derive(Clone)]
 struct Deferred {
     owner: Slot,
-    key: String,
     target: Value,
 }
 
@@ -113,6 +102,14 @@ enum Slot {
 }
 
 impl Slot {
+    /// Read the current value in this slot.
+    fn value(&self) -> Value {
+        match self {
+            Slot::Array(rc, index) => rc.borrow()[*index].clone(),
+            Slot::Object(rc, key) => rc.borrow().get(key).cloned().unwrap_or(Value::Null),
+        }
+    }
+
     /// Write a resolved value back into its parent. The slot already holds the
     /// array index or object key, so no key argument is needed.
     fn assign(&self, value: Value) {
@@ -127,36 +124,52 @@ impl Slot {
     }
 }
 
-struct Resolver<'a> {
+struct Resolver {
     input: Vec<Value>,
-    parsed: RefCell<HashSet<usize>>,
-    reviver: Option<Reviver<'a>>,
+    parsed: HashSet<usize>,
 }
 
-impl<'a> Resolver<'a> {
+impl Resolver {
+    fn resolve_root(&mut self, root: Value) -> Result<Value, ParseError> {
+        if root.is_container() {
+            self.parsed.insert(addr(&root));
+            let mut lazy: Vec<Deferred> = Vec::new();
+            self.resolve_node(&root, &mut lazy)?;
+
+            let mut i = 0;
+            while i < lazy.len() {
+                let Deferred { owner, target } = lazy[i].clone();
+                i += 1;
+                self.resolve_node(&target, &mut lazy)?;
+                owner.assign(target);
+            }
+        }
+
+        Ok(root)
+    }
+
     /// Resolve every child of one container node.
     ///
     /// A string child is a pointer. Look up its target. A fresh container
-    /// target is deferred to the queue and marked, so it is revived once and
-    /// shared. A primitive or already-seen target is assigned now through the
-    /// reviver. A non-string child is a literal, assigned through the reviver.
-    fn revive_node(&self, node: &Value, lazy: &mut Vec<Deferred>) -> Result<(), ParseError> {
+    /// target is deferred to the queue and marked, so it is resolved once and
+    /// shared. A primitive or already-seen target is assigned now. A
+    /// non-string child is a literal and stays in place.
+    fn resolve_node(&mut self, node: &Value, lazy: &mut Vec<Deferred>) -> Result<(), ParseError> {
         match node {
             Value::Array(rc) => {
                 let len = rc.borrow().len();
                 for index in 0..len {
-                    let key = index.to_string();
                     let child = rc.borrow()[index].clone();
                     let slot = Slot::Array(rc.clone(), index);
-                    self.resolve_child(&key, child, slot, lazy)?;
+                    self.resolve_child(child, slot, lazy)?;
                 }
             }
             Value::Object(rc) => {
                 let keys: Vec<String> = rc.borrow().keys().cloned().collect();
                 for key in keys {
                     let child = rc.borrow().get(&key).cloned().unwrap_or(Value::Null);
-                    let slot = Slot::Object(rc.clone(), key.clone());
-                    self.resolve_child(&key, child, slot, lazy)?;
+                    let slot = Slot::Object(rc.clone(), key);
+                    self.resolve_child(child, slot, lazy)?;
                 }
             }
             _ => {}
@@ -165,26 +178,24 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_child(
-        &self,
-        key: &str,
+        &mut self,
         child: Value,
         slot: Slot,
         lazy: &mut Vec<Deferred>,
     ) -> Result<(), ParseError> {
         if let Value::Str(index) = &child {
             let target = self.target(index)?;
-            if target.is_container() && self.parsed.borrow_mut().insert(addr(&target)) {
+            if target.is_container() && self.parsed.insert(addr(&target)) {
                 // Defer this fresh container so resolution stays iterative.
                 lazy.push(Deferred {
                     owner: slot,
-                    key: key.to_string(),
                     target,
                 });
             } else {
-                slot.assign(call_reviver(self.reviver, key, target));
+                slot.assign(target);
             }
         } else {
-            slot.assign(call_reviver(self.reviver, key, child));
+            slot.assign(child);
         }
         Ok(())
     }
@@ -202,6 +213,99 @@ impl<'a> Resolver<'a> {
             position: 0,
         })
     }
+}
+
+#[derive(Clone)]
+struct ReviveChild {
+    key: String,
+    slot: Slot,
+    value: Value,
+}
+
+struct ReviveFrame {
+    containers: Vec<ReviveChild>,
+    next: usize,
+    after: Option<ReviveChild>,
+}
+
+impl ReviveFrame {
+    fn new(node: &Value, after: Option<ReviveChild>, reviver: Reviver) -> Self {
+        let mut containers = Vec::new();
+
+        match node {
+            Value::Array(rc) => {
+                let len = rc.borrow().len();
+                for index in 0..len {
+                    let key = index.to_string();
+                    let slot = Slot::Array(rc.clone(), index);
+                    collect_revive_child(key, slot, reviver, &mut containers);
+                }
+            }
+            Value::Object(rc) => {
+                let keys: Vec<String> = rc.borrow().keys().cloned().collect();
+                for key in keys {
+                    let slot = Slot::Object(rc.clone(), key.clone());
+                    collect_revive_child(key, slot, reviver, &mut containers);
+                }
+            }
+            _ => {}
+        }
+
+        ReviveFrame {
+            containers,
+            next: 0,
+            after,
+        }
+    }
+
+    fn next_container(&mut self) -> Option<ReviveChild> {
+        let child = self.containers.get(self.next).cloned();
+        self.next += usize::from(child.is_some());
+        child
+    }
+}
+
+fn collect_revive_child(
+    key: String,
+    slot: Slot,
+    reviver: Reviver,
+    containers: &mut Vec<ReviveChild>,
+) {
+    let value = slot.value();
+    if value.is_container() {
+        containers.push(ReviveChild { key, slot, value });
+    } else {
+        slot.assign(call_reviver(Some(reviver), &key, value));
+    }
+}
+
+fn revive_graph(reviver: Reviver, root: Value) -> Value {
+    if root.is_container() {
+        let mut seen = HashSet::new();
+        seen.insert(addr(&root));
+        let mut stack = vec![ReviveFrame::new(&root, None, reviver)];
+
+        while !stack.is_empty() {
+            let child = stack.last_mut().and_then(ReviveFrame::next_container);
+            if let Some(child) = child {
+                if seen.insert(addr(&child.value)) {
+                    stack.push(ReviveFrame::new(&child.value, Some(child.clone()), reviver));
+                } else {
+                    let revived = call_reviver(Some(reviver), &child.key, child.value);
+                    child.slot.assign(revived);
+                }
+                continue;
+            }
+
+            let frame = stack.pop().expect("stack is not empty");
+            if let Some(child) = frame.after {
+                let revived = call_reviver(Some(reviver), &child.key, child.value);
+                child.slot.assign(revived);
+            }
+        }
+    }
+
+    call_reviver(Some(reviver), "", root)
 }
 
 /// Run the reviver if present, otherwise return the value unchanged.
