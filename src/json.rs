@@ -180,6 +180,55 @@ struct Parser<'a> {
     pos: usize,
 }
 
+enum Frame {
+    Array {
+        items: Vec<Value>,
+        expect_value: bool,
+    },
+    Object {
+        object: Object,
+        state: ObjectState,
+    },
+}
+
+enum ObjectState {
+    Key { allow_end: bool },
+    Value(String),
+    AfterValue,
+}
+
+fn close_frame(stack: &mut Vec<Frame>) -> Option<Value> {
+    let value = match stack.pop().expect("frame exists") {
+        Frame::Array { items, .. } => Value::array(items),
+        Frame::Object { object, .. } => Value::object(object),
+    };
+    if stack.is_empty() {
+        Some(value)
+    } else {
+        attach_value(stack, value);
+        None
+    }
+}
+
+fn attach_value(stack: &mut [Frame], value: Value) {
+    match stack.last_mut().expect("parent frame exists") {
+        Frame::Array {
+            items,
+            expect_value,
+        } => {
+            items.push(value);
+            *expect_value = false;
+        }
+        Frame::Object { object, state } => {
+            let previous = std::mem::replace(state, ObjectState::AfterValue);
+            match previous {
+                ObjectState::Value(key) => object.insert(key, value),
+                _ => unreachable!("object value state exists"),
+            }
+        }
+    }
+}
+
 impl<'a> Parser<'a> {
     fn error(&self, message: &str) -> ParseError {
         ParseError {
@@ -203,8 +252,7 @@ impl<'a> Parser<'a> {
 
     fn parse_value(&mut self) -> Result<Value, ParseError> {
         match self.peek() {
-            Some(b'{') => self.parse_object(),
-            Some(b'[') => self.parse_array(),
+            Some(b'{') | Some(b'[') => self.parse_container(),
             Some(b'"') => Ok(Value::Str(self.parse_string()?)),
             Some(b't') => self.parse_literal("true", Value::Bool(true)),
             Some(b'f') => self.parse_literal("false", Value::Bool(false)),
@@ -223,63 +271,145 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_array(&mut self) -> Result<Value, ParseError> {
-        self.pos += 1; // consume '['
-        let mut items = Vec::new();
-        self.skip_ws();
-        if self.peek() == Some(b']') {
-            self.pos += 1;
-            return Ok(Value::array(items));
-        }
+    fn parse_container(&mut self) -> Result<Value, ParseError> {
+        let mut stack = Vec::new();
+        self.start_container(&mut stack)?;
+
         loop {
             self.skip_ws();
-            items.push(self.parse_value()?);
-            self.skip_ws();
-            match self.peek() {
-                Some(b',') => self.pos += 1,
-                Some(b']') => {
-                    self.pos += 1;
-                    break;
+            match stack.last() {
+                Some(Frame::Array {
+                    expect_value,
+                    items,
+                }) if *expect_value => {
+                    if items.is_empty() && self.peek() == Some(b']') {
+                        self.pos += 1;
+                        if let Some(value) = close_frame(&mut stack) {
+                            return Ok(value);
+                        }
+                    } else {
+                        self.parse_child_value(&mut stack)?;
+                    }
                 }
-                _ => return Err(self.error("expected ',' or ']' in array")),
+                Some(Frame::Array { .. }) => match self.peek() {
+                    Some(b',') => {
+                        self.pos += 1;
+                        if let Some(Frame::Array { expect_value, .. }) = stack.last_mut() {
+                            *expect_value = true;
+                        }
+                    }
+                    Some(b']') => {
+                        self.pos += 1;
+                        if let Some(value) = close_frame(&mut stack) {
+                            return Ok(value);
+                        }
+                    }
+                    _ => return Err(self.error("expected ',' or ']' in array")),
+                },
+                Some(Frame::Object {
+                    state: ObjectState::Key { allow_end },
+                    ..
+                }) => {
+                    if *allow_end && self.peek() == Some(b'}') {
+                        self.pos += 1;
+                        if let Some(value) = close_frame(&mut stack) {
+                            return Ok(value);
+                        }
+                    } else {
+                        if self.peek() != Some(b'"') {
+                            return Err(self.error("expected string key in object"));
+                        }
+                        let key = self.parse_string()?;
+                        self.skip_ws();
+                        if self.peek() != Some(b':') {
+                            return Err(self.error("expected ':' after object key"));
+                        }
+                        self.pos += 1;
+                        if let Some(Frame::Object { state, .. }) = stack.last_mut() {
+                            *state = ObjectState::Value(key);
+                        }
+                    }
+                }
+                Some(Frame::Object {
+                    state: ObjectState::Value(_),
+                    ..
+                }) => {
+                    self.parse_child_value(&mut stack)?;
+                }
+                Some(Frame::Object {
+                    state: ObjectState::AfterValue,
+                    ..
+                }) => match self.peek() {
+                    Some(b',') => {
+                        self.pos += 1;
+                        if let Some(Frame::Object { state, .. }) = stack.last_mut() {
+                            *state = ObjectState::Key { allow_end: false };
+                        }
+                    }
+                    Some(b'}') => {
+                        self.pos += 1;
+                        if let Some(value) = close_frame(&mut stack) {
+                            return Ok(value);
+                        }
+                    }
+                    _ => return Err(self.error("expected ',' or '}' in object")),
+                },
+                None => unreachable!("container stack has a root frame"),
             }
         }
-        Ok(Value::array(items))
     }
 
-    fn parse_object(&mut self) -> Result<Value, ParseError> {
-        self.pos += 1; // consume '{'
-        let mut object = Object::new();
-        self.skip_ws();
-        if self.peek() == Some(b'}') {
-            self.pos += 1;
-            return Ok(Value::object(object));
+    fn parse_child_value(&mut self, stack: &mut Vec<Frame>) -> Result<(), ParseError> {
+        match self.peek() {
+            Some(b'{') | Some(b'[') => self.start_container(stack),
+            Some(b'"') => {
+                attach_value(stack, Value::Str(self.parse_string()?));
+                Ok(())
+            }
+            Some(b't') => {
+                let value = self.parse_literal("true", Value::Bool(true))?;
+                attach_value(stack, value);
+                Ok(())
+            }
+            Some(b'f') => {
+                let value = self.parse_literal("false", Value::Bool(false))?;
+                attach_value(stack, value);
+                Ok(())
+            }
+            Some(b'n') => {
+                let value = self.parse_literal("null", Value::Null)?;
+                attach_value(stack, value);
+                Ok(())
+            }
+            Some(c) if c == b'-' || c.is_ascii_digit() => {
+                let value = self.parse_number()?;
+                attach_value(stack, value);
+                Ok(())
+            }
+            _ => Err(self.error("expected a JSON value")),
         }
-        loop {
-            self.skip_ws();
-            if self.peek() != Some(b'"') {
-                return Err(self.error("expected string key in object"));
+    }
+
+    fn start_container(&mut self, stack: &mut Vec<Frame>) -> Result<(), ParseError> {
+        match self.peek() {
+            Some(b'[') => {
+                self.pos += 1;
+                stack.push(Frame::Array {
+                    items: Vec::new(),
+                    expect_value: true,
+                });
+                Ok(())
             }
-            let key = self.parse_string()?;
-            self.skip_ws();
-            if self.peek() != Some(b':') {
-                return Err(self.error("expected ':' after object key"));
+            Some(b'{') => {
+                self.pos += 1;
+                stack.push(Frame::Object {
+                    object: Object::new(),
+                    state: ObjectState::Key { allow_end: true },
+                });
+                Ok(())
             }
-            self.pos += 1;
-            self.skip_ws();
-            let value = self.parse_value()?;
-            object.insert(key, value);
-            self.skip_ws();
-            match self.peek() {
-                Some(b',') => self.pos += 1,
-                Some(b'}') => {
-                    self.pos += 1;
-                    break;
-                }
-                _ => return Err(self.error("expected ',' or '}' in object")),
-            }
+            _ => Err(self.error("expected a JSON value")),
         }
-        Ok(Value::object(object))
     }
 
     fn parse_string(&mut self) -> Result<String, ParseError> {
